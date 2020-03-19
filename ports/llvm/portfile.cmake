@@ -1,132 +1,132 @@
 include(vcpkg_common_functions)
 
-# LLVM documentation recommends always using static library linkage when
-# building with Microsoft toolchain; it's also the default on other platforms
+set(VERSION "10.0.0")
+
 vcpkg_check_linkage(ONLY_STATIC_LIBRARY)
 
-if(VCPKG_CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
-    message(FATAL_ERROR "llvm cannot currently be built for UWP")
-endif()
-
-vcpkg_download_distfile(ARCHIVE
-    URLS "http://releases.llvm.org/8.0.0/llvm-8.0.0.src.tar.xz"
-    FILENAME "llvm-8.0.0.src.tar.xz"
-    SHA512 1602343b451b964f5d8c2d6b0654d89384c80d45883498c5f0e2f4196168dd4a1ed2a4dadb752076020243df42ffe46cb31d82ffc145d8e5874163cbb9686a1f
-)
-
-vcpkg_extract_source_archive_ex(
+vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
-    ARCHIVE ${ARCHIVE}
+    REPO llvm/llvm-project
+    REF llvmorg-10.0.0-rc3
+    SHA512 aad1df86063612d20c48ea7046940330fe2ac572a146be22ff71d9e65fa3438184cb39a2533fc6afd1e74df26909a9f0d24ebcd7d62e74728cfd81e447f2ffbf
+    HEAD_REF master
     PATCHES
-        install-llvm-modules-to-share.patch
-        fix-linux-build.patch
+        0001-allow-to-use-commas.patch
+        0002-fix-install-paths.patch
 )
-
-vcpkg_download_distfile(CLANG_ARCHIVE
-    URLS "http://releases.llvm.org/8.0.0/cfe-8.0.0.src.tar.xz"
-    FILENAME "cfe-8.0.0.src.tar.xz"
-    SHA512 98e540222719716985e5d8439116e47469cb01201ea91d1da7e46cb6633da099688d9352c3b65e5c5f660cbbae353b3d79bb803fc66b3be663f2b04b1feed1c3
-)
-
-vcpkg_extract_source_archive_ex(
-    OUT_SOURCE_PATH CLANG_SOURCE_PATH
-    ARCHIVE ${CLANG_ARCHIVE}
-    PATCHES
-        fix-build-error.patch
-        install-clang-modules-to-share.patch
-)
-
-if(NOT EXISTS ${SOURCE_PATH}/tools/clang)
-  file(RENAME ${CLANG_SOURCE_PATH} ${SOURCE_PATH}/tools/clang)
-endif()
-
-vcpkg_find_acquire_program(PYTHON3)
-get_filename_component(PYTHON3_DIR "${PYTHON3}" DIRECTORY)
-set(ENV{PATH} "$ENV{PATH};${PYTHON3_DIR}")
 
 vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
+    tools LLVM_BUILD_TOOLS
     tools LLVM_INCLUDE_TOOLS
+    utils LLVM_BUILD_UTILS
     utils LLVM_INCLUDE_UTILS
-    example LLVM_INCLUDE_EXAMPLES
-    test LLVM_INCLUDE_TESTS
+    enable-rtti LLVM_ENABLE_RTTI
 )
 
+# By default in LLVM assertions are enabled for Debug configuration only.
+# `enable-assertions` explicitly enables assertions for all configurations.
+if("enable-assertions" IN_LIST FEATURES)
+    list(APPEND FEATURE_OPTIONS
+        -DLLVM_ENABLE_ASSERTIONS=ON
+    )
+endif()
+
+set(LLVM_ENABLE_PROJECTS)
+if("clang" IN_LIST FEATURES OR "clang-tools-extra" IN_LIST FEATURES)
+    list(APPEND LLVM_ENABLE_PROJECTS "clang")
+    list(APPEND FEATURE_OPTIONS
+        # Disable install the scan-build tool
+        -DCLANG_INSTALL_SCANBUILD=OFF
+        # Disable install the scan-view tool
+        -DCLANG_INSTALL_SCANVIEW=OFF
+    )
+endif()
+if("clang-tools-extra" IN_LIST FEATURES)
+    list(APPEND LLVM_ENABLE_PROJECTS "clang-tools-extra")
+endif()
+if("compiler-rt" IN_LIST FEATURES)
+    list(APPEND LLVM_ENABLE_PROJECTS "compiler-rt")
+endif()
+if("lld" IN_LIST FEATURES)
+    list(APPEND LLVM_ENABLE_PROJECTS "lld")
+endif()
+if("openmp" IN_LIST FEATURES)
+    list(APPEND LLVM_ENABLE_PROJECTS "openmp")
+    # Perl is required for the OpenMP run-time
+    vcpkg_find_acquire_program(PERL)
+    list(APPEND FEATURE_OPTIONS
+        -DPERL_EXECUTABLE=${PERL}
+    )
+endif()
+if("lldb" IN_LIST FEATURES)
+    list(APPEND LLVM_ENABLE_PROJECTS "lldb")
+endif()
+if("polly" IN_LIST FEATURES)
+    list(APPEND LLVM_ENABLE_PROJECTS "polly")
+endif()
+
+# Use comma-separated string for enabled projects instead of semicolon-separated string.
+# See issue https://github.com/microsoft/vcpkg/issues/4320
+string(REPLACE ";" "," LLVM_ENABLE_PROJECTS "${LLVM_ENABLE_PROJECTS}")
+
+vcpkg_find_acquire_program(PYTHON3)
+
 vcpkg_configure_cmake(
-    SOURCE_PATH ${SOURCE_PATH}
+    SOURCE_PATH ${SOURCE_PATH}/llvm
     PREFER_NINJA
-    OPTIONS ${FEATURE_OPTIONS}
-        -DLLVM_TARGETS_TO_BUILD=X86
+    OPTIONS
+        ${FEATURE_OPTIONS}
         -DLLVM_ABI_BREAKING_CHECKS=FORCE_OFF
-        -DLLVM_TOOLS_INSTALL_DIR=tools/llvm
         -DLLVM_PARALLEL_LINK_JOBS=1
+        -DLLVM_INCLUDE_EXAMPLES=OFF
+        -DLLVM_BUILD_EXAMPLES=OFF
+        # LLVM generates CMake error due to Visual Studio version 16.4 is known to miscompile part of LLVM.
+        # LLVM_TEMPORARILY_ALLOW_OLD_TOOLCHAIN=ON disables this error.
+        # See https://developercommunity.visualstudio.com/content/problem/845933/miscompile-boolean-condition-deduced-to-be-always.html
+        -DLLVM_TEMPORARILY_ALLOW_OLD_TOOLCHAIN=ON
+        -DLLVM_ENABLE_PROJECTS=${LLVM_ENABLE_PROJECTS}
+        -DPACKAGE_VERSION=${VERSION}
+        -DPYTHON_EXECUTABLE=${PYTHON3}
 )
 
 vcpkg_install_cmake()
-
-if(NOT DEFINED VCPKG_BUILD_TYPE OR VCPKG_BUILD_TYPE STREQUAL "release")
-    file(GLOB EXE ${CURRENT_PACKAGES_DIR}/bin/*)
-    file(COPY ${EXE} DESTINATION ${CURRENT_PACKAGES_DIR}/tools/llvm)
-    file(REMOVE ${EXE})
-endif()
-
-if(NOT DEFINED VCPKG_BUILD_TYPE OR VCPKG_BUILD_TYPE STREQUAL "debug")
-    file(GLOB DEBUG_EXE ${CURRENT_PACKAGES_DIR}/debug/bin/*)
-    file(COPY ${DEBUG_EXE} DESTINATION ${CURRENT_PACKAGES_DIR}/debug/tools/llvm)
-    file(REMOVE ${DEBUG_EXE})
-endif()
-
-vcpkg_fixup_cmake_targets(CONFIG_PATH share/clang TARGET_PATH share/clang)
 vcpkg_fixup_cmake_targets(CONFIG_PATH share/llvm)
-vcpkg_copy_tool_dependencies(${CURRENT_PACKAGES_DIR}/tools/llvm)
+vcpkg_fixup_cmake_targets(CONFIG_PATH share/clang TARGET_PATH share/clang)
 
+set(_release_targets)
+set(_debug_targets)
 if(NOT DEFINED VCPKG_BUILD_TYPE OR VCPKG_BUILD_TYPE STREQUAL "release")
-    file(READ ${CURRENT_PACKAGES_DIR}/share/clang/ClangTargets-release.cmake RELEASE_MODULE)
-    string(REPLACE "\${_IMPORT_PREFIX}/bin" "\${_IMPORT_PREFIX}/tools/llvm" RELEASE_MODULE "${RELEASE_MODULE}")
-    file(WRITE ${CURRENT_PACKAGES_DIR}/share/clang/ClangTargets-release.cmake "${RELEASE_MODULE}")
-
-    file(READ ${CURRENT_PACKAGES_DIR}/share/llvm/LLVMExports-release.cmake RELEASE_MODULE)
-    string(REPLACE "\${_IMPORT_PREFIX}/bin" "\${_IMPORT_PREFIX}/tools/llvm" RELEASE_MODULE "${RELEASE_MODULE}")
-    file(WRITE ${CURRENT_PACKAGES_DIR}/share/llvm/LLVMExports-release.cmake "${RELEASE_MODULE}")
+    file(GLOB_RECURSE _release_targets
+        "${CURRENT_PACKAGES_DIR}/share/llvm/*-release.cmake"
+        "${CURRENT_PACKAGES_DIR}/share/clang/*-release.cmake"
+    )
 endif()
-
 if(NOT DEFINED VCPKG_BUILD_TYPE OR VCPKG_BUILD_TYPE STREQUAL "debug")
-    file(READ ${CURRENT_PACKAGES_DIR}/share/clang/ClangTargets-debug.cmake DEBUG_MODULE)
-    string(REPLACE "\${_IMPORT_PREFIX}/debug/bin" "\${_IMPORT_PREFIX}/tools/llvm" DEBUG_MODULE "${DEBUG_MODULE}")
-    file(WRITE ${CURRENT_PACKAGES_DIR}/share/clang/ClangTargets-debug.cmake "${DEBUG_MODULE}")
-
-    file(READ ${CURRENT_PACKAGES_DIR}/share/llvm/LLVMExports-debug.cmake DEBUG_MODULE)
-    string(REPLACE "\${_IMPORT_PREFIX}/debug/bin" "\${_IMPORT_PREFIX}/tools/llvm" DEBUG_MODULE "${DEBUG_MODULE}")
-    file(WRITE ${CURRENT_PACKAGES_DIR}/share/llvm/LLVMExports-debug.cmake "${DEBUG_MODULE}")
+    file(GLOB_RECURSE _debug_targets
+        "${CURRENT_PACKAGES_DIR}/share/llvm/*-debug.cmake"
+        "${CURRENT_PACKAGES_DIR}/share/clang/*-debug.cmake"
+        )
 endif()
 
-if (EXISTS ${CURRENT_PACKAGES_DIR}/share/llvm/LLVMConfig.cmake)
-    file(READ ${CURRENT_PACKAGES_DIR}/share/llvm/LLVMConfig.cmake LLVM_TOOLS_MODULE)
-    string(REPLACE "\${LLVM_INSTALL_PREFIX}/bin" "\${LLVM_INSTALL_PREFIX}/tools/llvm" LLVM_TOOLS_MODULE "${LLVM_TOOLS_MODULE}")
-    file(WRITE ${CURRENT_PACKAGES_DIR}/share/llvm/LLVMConfig.cmake "${LLVM_TOOLS_MODULE}")
-endif()
+# All LLVM tools should be located in the bin folder because llvm-config expects to be inside a bin dir.
+# So, rename subfolder `/tools/${PORT}` to `/bin` back because there is no way to avoid this in vcpkg_fixup_cmake_targets.
+foreach(_target IN LISTS _release_targets _debug_targets)
+    file(READ ${_target} _contents)
+    string(REPLACE "{_IMPORT_PREFIX}/tools/${PORT}" "{_IMPORT_PREFIX}/bin" _contents "${_contents}")
+    string(REPLACE "{_IMPORT_PREFIX}/tools/debug/${PORT}" "{_IMPORT_PREFIX}/debug/bin" _contents "${_contents}")
+    file(WRITE ${_target} "${_contents}")
+endforeach()
 
 file(REMOVE_RECURSE
     ${CURRENT_PACKAGES_DIR}/debug/include
-    ${CURRENT_PACKAGES_DIR}/debug/tools
     ${CURRENT_PACKAGES_DIR}/debug/share
-    ${CURRENT_PACKAGES_DIR}/debug/bin
-    ${CURRENT_PACKAGES_DIR}/debug/msbuild-bin
-    ${CURRENT_PACKAGES_DIR}/bin
-    ${CURRENT_PACKAGES_DIR}/msbuild-bin
-    ${CURRENT_PACKAGES_DIR}/tools/msbuild-bin
-    ${CURRENT_PACKAGES_DIR}/include/llvm/BinaryFormat/WasmRelocs
 )
 
-# Remove two empty include subdirectorys if they are indeed empty
-file(GLOB MCANALYSISFILES ${CURRENT_PACKAGES_DIR}/include/llvm/MC/MCAnalysis/*)
-if(NOT MCANALYSISFILES)
-  file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/include/llvm/MC/MCAnalysis)
-endif()
-
-file(GLOB MACHOFILES ${CURRENT_PACKAGES_DIR}/include/llvm/TextAPI/MachO/*)
-if(NOT MACHOFILES)
-  file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/include/llvm/TextAPI/MachO)
-endif()
-
 # Handle copyright
-file(INSTALL ${SOURCE_PATH}/LICENSE.TXT DESTINATION ${CURRENT_PACKAGES_DIR}/share/${PORT} RENAME copyright)
+file(INSTALL ${SOURCE_PATH}/llvm/LICENSE.TXT DESTINATION ${CURRENT_PACKAGES_DIR}/share/llvm RENAME copyright)
+if("clang" IN_LIST FEATURES)
+    file(INSTALL ${SOURCE_PATH}/clang/LICENSE.TXT DESTINATION ${CURRENT_PACKAGES_DIR}/share/clang RENAME copyright)
+endif()
+
+# Don't fail if the bin folder exists.
+set(VCPKG_POLICY_EMPTY_PACKAGE enabled)
